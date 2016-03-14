@@ -1,0 +1,57 @@
+#!/usr/bin/env python
+import rospy
+from geometry_msgs.msg import Twist
+import sys, select, tty, time
+
+def move(lin, ang, n):
+    t = Twist()
+    pub = rospy.Publisher('~cmd_vel', Twist, queue_size=5)
+    time.sleep(1)
+    t.linear.x  = lin
+    t.angular.z = ang
+
+    for i in range(n):
+        pub.publish(t)
+        time.sleep(0.1)
+
+    t.linear.x  = 0
+    t.angular.z = 0
+    pub.publish(t)
+
+    return
+
+
+def rectangle_movement(step):
+    twist = Twist()
+    twist.linear.x = 0.4 
+    step = step % 20
+    if step % 5 == 0:
+        twist.linear.x = 0
+        twist.angular.z = 2.8
+    return twist
+
+if __name__ == "__main__":
+    rospy.init_node('movetest')
+    pub = rospy.Publisher('~cmd_vel', Twist, queue_size=5)
+    time.sleep(1)
+
+    #try:
+    #move(0, 0.5, 33) # pravi kot
+    #move(0.5, 0, 10) # 35cm
+
+    move(0.5, 0, 59) # 200cm
+    move(0, -0.5, 27) # pravi kot
+    move(0.5, 0, 55) # 200cm
+
+    #except:
+    print(sys.exc_info()[0])
+
+    #finally:
+    twist = Twist()
+    twist.linear.x  = 0
+    twist.linear.y  = 0
+    twist.linear.z  = 0
+    twist.angular.x = 0
+    twist.angular.y = 0
+    twist.angular.z = 0
+    pub.publish(twist)

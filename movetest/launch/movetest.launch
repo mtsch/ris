@@ -1,0 +1,5 @@
+<launch>
+  <node pkg="movetest" type="movetest" name="movetest" output="screen">
+    <remap from="movetest/cmd_vel" to="cmd_vel_mux/input/teleop"/>
+  </node>
+</launch>
