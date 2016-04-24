@@ -1,4 +1,11 @@
 <launch>
+
+	<arg name="map_file" default="$(find navigacija)/map.yaml"/>
+
+  <!-- Run the map server -->
+  <node name="map_server" pkg="map_server" type="map_server" args="$(arg map_file)" />
+
+
   <arg name="custom_param_file" default="$(find turtlebot_navigation)/param/dummy.yaml"/>
   <include file="$(find turtlebot_bringup)/launch/3dsensor.launch">
     <arg name="rgb_processing" value="false" />
@@ -26,6 +33,14 @@
 
   <include file="$(find turtlebot_navigation)/launch/includes/move_base.launch.xml">
     <arg name="custom_param_file" value="$(arg custom_param_file)"/>
+  </include>
+
+	<include file="$(find facedetector)/launch/facedetector.launch">
+	<arg name="image_topic" value="/camera/rgb/image_raw" />
+  </include>
+
+  <include file="$(find facedetector)/launch/facemapper.launch">
+	<arg name="camera_topic" value="/camera/rgb/camera_info" />
   </include>
 
 </launch>
