@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 2.8.3)
-project(mapa)
+project(navigacija)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
@@ -8,11 +8,7 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
   rospy
   std_msgs
-	genmsg 
-	actionlib_msgs 
-	actionlib
 )
-generate_messages(DEPENDENCIES actionlib_msgs)
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
