@@ -6,8 +6,9 @@ from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 import actionlib
 from actionlib_msgs.msg import *
 from geometry_msgs.msg import Pose, Point, Quaternion
+import std_msgs.msg
 
-class GoToPose():
+class ApproachFace():
 	def __init__(self):
 
 		self.goal_sent = False
@@ -21,6 +22,13 @@ class GoToPose():
 
 		#Allow up to 5 seconds for the action server to come up
 		self.move_base.wait_for_server(rospy.Duration(5))
+
+
+		rospy.init_node('approach')
+		rospy.Subscriber('map', String, test_cb)
+
+	def test_cb(data):
+		print(data)
 
 	def goto(self, pos, quat):
 
@@ -43,38 +51,19 @@ class GoToPose():
 
 		if success and state == GoalStatus.SUCCEEDED:
 			# We made it!
-						result = True
+			result = True
 		else:
 			self.move_base.cancel_goal()
 
 		self.goal_sent = False
-		return result
 
-	def shutdown(self):
-		if self.goal_sent:
-			self.move_base.cancel_goal()
-			rospy.loginfo("Stop")
-			rospy.sleep(1)
+	# pos current position
+	# marker marker recieved
+	def approach(self, pos, marker):
 
-if __name__ == '__main__':
-	try:
-		rospy.init_node('goto')
-								navigator = GoToPose()
 
-		# Customize the following values so they are appropriate for your location
-								position = {'x': 0.1, 'y' : 0.0}
-								quaternion = {'r1' : 0.000, 'r2' : 0.000, 'r3' : 0.000, 'r4' : 1.000}
 
-								rospy.loginfo("Go to (%s, %s) pose", position['x'], position['y'])
-								success = navigator.goto(position, quaternion)
 
-								if success:
-									rospy.loginfo("Hooray, reached the desired pose")
-								else:
-									rospy.loginfo("The base failed to reach the desired pose")
 
-		# Sleep to give the last log messages time to be sent
-								rospy.sleep(1)
 
-	except rospy.ROSInterruptException:
-		rospy.loginfo("Ctrl-C caught. Quitting")
+
