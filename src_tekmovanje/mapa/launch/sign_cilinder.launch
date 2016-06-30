@@ -1,0 +1,6 @@
+<launch>
+
+  <include file="$(find my_pcl_tutorial)/launch/blob.launch" />
+	<include file="$(find sign_detector)/launch/sign_detector.launch" />
+
+</launch>

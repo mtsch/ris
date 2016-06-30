@@ -1,0 +1,8 @@
+<launch>
+
+  <include file="$(find turtlebot_bringup)/launch/minimal.launch" />
+	<include file="$(find mapa)/launch/amcl_demo.launch" />
+	<include file="$(find localizer)/launch/localizer_node.launch" />
+	<include file="$(find sound_play)/soundplay_node.launch" />
+
+</launch>

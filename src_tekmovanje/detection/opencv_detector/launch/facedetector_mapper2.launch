@@ -1,0 +1,13 @@
+<launch>
+
+  <include file="$(find opencv_detector)/launch/facedetector.launch">
+	<arg name="image_topic" value="/camera/rgb/image_color" />
+  </include>
+
+  <node pkg="localizer" type="mapper" name="facemapper" output="screen">
+    <remap from="detections" to="/facedetector/faces" />
+    <remap from="camera_info" to="/camera/rgb/camera_info" />
+    <remap from="mapper" to="/facedetector/markers" />
+  </node>
+
+</launch>

@@ -1,0 +1,380 @@
+#!/usr/bin/env python
+import roslib
+roslib.load_manifest('localizer')
+import rospy
+import sys, select, termios, tty
+from std_msgs.msg import String, Bool, ColorRGBA
+import sensor_msgs.msg
+import message_filters
+import collections
+from detection_msgs.msg import Detection
+from localizer.srv import Localize
+from sensor_msgs.msg import CameraInfo
+from visualization_msgs.msg import Marker, MarkerArray
+from image_geometry import PinholeCameraModel
+from geometry_msgs.msg import Point, Vector3, PoseStamped, PoseWithCovarianceStamped
+from nav_msgs.msg import *
+import math
+import tf
+
+import cv2
+from cv_bridge import CvBridge, CvBridgeError
+import numpy as np
+import os
+from PIL import Image
+import copy
+
+class DetectionMapper():
+
+    def recognize(self, detection, locationX, locationY, frame_id, currentPose):
+        debug_show_all = True
+        debug_show_dist_index = -1
+
+        detected_image = detection.image    # sensor_msgs/Image image
+
+        # debuging
+        """cv_face0 = cv2.imread('/home/denis/Documents/detective_mathew/face_bgr8_22.png', 1) # debug
+        print np.shape(cv_face0)
+        cv_face = cv_face0
+        cv_face[:,:,0] = cv_face0[:,:,2] # ker opencv nalozi v brg8
+        cv_face[:,:,2] = cv_face0[:,:,0]
+        print np.shape(cv_face)
+        """
+        try:
+            cv_face = self.bridge.imgmsg_to_cv2(detected_image, "mono8") #rgb8 ali mono8
+        except CvBridgeError as e:
+            print(e)
+        resized_face = cv2.resize(cv_face, self.face_size)
+        """# lda recognizer
+        face = resized_face.reshape((-1,1))
+        #print str(np.shape(face)) + " == " + str(np.shape(matrixW))
+        current = np.transpose(np.dot(matrixW, face))
+        #print str(np.shape(current)) + " result shape"
+        min_dist = -1
+        vote = -1
+        for i in range(len(meansLDA)):
+            difference = current - meansLDA[i]
+            dist = abs(difference.sum())
+            #print str(i)+"("+str(dist)+") : "+str(meansLDA[i])#str(difference)
+            if dist < min_dist or min_dist == -1:
+                min_dist = dist
+                vote = i
+            if i == debug_show_dist_index or debug_show_all:
+                print i, dist
+            #print str(i) + " " + str(meansLDA[i].sum())
+        #print "current " + str(current)
+        print str(vote) + "  dist " + str(min_dist)
+        """
+        # opencv recgnizer
+        vote, conf = self.recognizer.predict(resized_face)
+        #print vote, conf, "%"
+        
+        self.faceDict[(locationX, locationY, self.marker_id_counter)] = vote
+        sameVoteCount = 0
+        totalCount = 0
+        for coordinates in self.faceDict:
+            if math.sqrt((locationX - coordinates[0])**2 + (locationY - coordinates[1])**2) < 0.15:
+                totalCount += 1
+                if vote == self.faceDict[coordinates]:
+                    sameVoteCount += 1
+        if sameVoteCount/float(totalCount) >= 0.6 and sameVoteCount > 2:
+            valid1 = True
+            valid2 = False
+            for marker in self.rec_markers.markers:
+                if (math.sqrt((locationX - marker.pose.position.x)**2 + \
+                   (locationY - marker.pose.position.y)**2) < 0.25):
+                    valid1 = False
+            for marker in self.face_loc_markers.markers:
+                if (math.sqrt((locationX - marker.pose.position.x)**2 + \
+                   (locationY - marker.pose.position.y)**2) < 0.25):
+                    valid2 = True
+                    break
+            if valid1 and valid2:
+                marker = Marker()
+                marker.header.stamp = detection.header.stamp
+                marker.header.frame_id = frame_id
+                marker.pose = copy.deepcopy(currentPose)
+                marker.pose.position.z = 1.1
+                marker.type = Marker.TEXT_VIEW_FACING
+                marker.action = Marker.ADD
+                marker.frame_locked = False
+                marker.lifetime = rospy.Time(0)
+                marker.id = self.marker_id_counter
+                marker.scale = Vector3(0.1, 0.1, 0.1)
+                marker.color = ColorRGBA(0, 1, 0, 1)
+                marker.text = self.face_names[vote]
+                self.rec_markers.markers.append(marker)
+                self.recognition_pub.publish(self.rec_markers)
+
+            print self.face_names[vote] + " " + str(vote) + " " + str(sameVoteCount) + ", " + \
+                  str(sameVoteCount/float(totalCount) * 100)+"%" + "; RECOGNIZED"
+        else:
+            print self.face_names[vote] + " " + str(vote) + " " + str(sameVoteCount) + ", " + \
+                  str(sameVoteCount/float(totalCount) * 100)+"%" + "; rec. not enought"
+
+    def camera_callback(self, camera_info):
+        self.camera_infos.append(camera_info)
+        #print "("+str(len(self.all_markers.markers))+") camera callback"
+
+    def callback_pose(self, data):
+        self.lastpose = data.pose.pose.position
+
+    def checkForFaceLocation(self, currentPose, detection, frame_id):
+        currentPoint = currentPose.position
+        print "check loc"
+
+        recognitionMin = 8#11
+        recognitionMax = 14
+        ok = True
+        sosedje = 10             # number of existing markers needed for valid location
+        distance = 0.1           # markers under this distance are counted for current location
+        faceExclusionZone = 0.70  # minimal distance between faces (don't add markers < this distance)
+        maximum_z = 1.0
+        tooFar = 1.0
+        overlapCount = 0
+        self_delta = 0.1  #0.1        # minimal distance from robot CHANGED FR TESTING
+        if currentPoint.z > maximum_z:
+            print "(z issue)"
+            return False
+        if abs(self.lastpose.x - currentPoint.x) < self_delta and abs(self.lastpose.y - currentPoint.y) < self_delta:
+            print "(delta issue): " + str(abs(self.lastpose.x - currentPoint.x) < self_delta)+str(abs(self.lastpose.x - currentPoint.x))+" ; "+ str(abs(self.lastpose.y - currentPoint.y) < self_delta)+ str(abs(self.lastpose.y - currentPoint.y))
+            return False
+        if math.sqrt((currentPoint.x - self.lastpose.x)**2 + (currentPoint.y - self.lastpose.y)**2) > tooFar:
+            print "detection too far"
+            return False
+        for marker in self.face_loc_markers.markers:
+            if (math.sqrt((currentPoint.x - marker.pose.position.x)**2 + (currentPoint.y - marker.pose.position.y)**2) < faceExclusionZone):
+                ok = False
+                #print "(already detected)"
+                break
+        recognitionCheck = True
+        for marker in self.all_markers.markers:
+            if (math.sqrt((currentPoint.x - marker.pose.position.x)**2 + (currentPoint.y - marker.pose.position.y)**2) < distance):
+                overlapCount += 1
+                # ZACASNO ODSTANJENO
+                if overlapCount >= recognitionMax:
+                    return ok
+                if recognitionCheck and overlapCount >= recognitionMin:
+                    self.recognize(detection, currentPoint.x, currentPoint.y, frame_id, currentPose) # CALL RECOGNITION
+                    recognitionCheck = False
+                
+        #print "(overlap "+str(overlapCount)+")"
+        return ok and (overlapCount >= sosedje)
+
+    def detection_callback(self, detection):
+        print "det"
+
+        u = detection.x + detection.width / 2
+        v = detection.y + detection.height / 2
+
+        camera_info = None
+        best_time = 100
+        for ci in self.camera_infos:
+            time = abs(ci.header.stamp.to_sec() - detection.header.stamp.to_sec())
+            if time < best_time:
+                camera_info = ci
+                best_time = time
+
+        if not camera_info or best_time > 1:
+            if not camera_info:
+                print "not camera_info"
+            if best_time > 1:
+                print "best_time > 1 (" + str(best_time) + ")"
+            return
+
+        camera_model = PinholeCameraModel()
+        camera_model.fromCameraInfo(camera_info)
+
+        point = Point(((u - camera_model.cx()) - camera_model.Tx()) / camera_model.fx(),
+             ((v - camera_model.cy()) - camera_model.Ty()) / camera_model.fy(), 1)
+
+        localization = self.localize(detection.header, point, self.region_scope)
+
+        if not localization:
+            print "localization failed"
+            return
+
+        self.marker_id_counter += 1
+
+        now = detection.header.stamp
+        stampedPose = PoseStamped()
+        stampedPose.pose = localization.pose
+        stampedPose.header.stamp = now
+        stampedPose.header.frame_id = detection.header.frame_id
+        #print detection.header.frame_id
+        #print "x " + str(localization.pose.position.x) + ", y " + str(localization.pose.position.y)
+
+        if localization.pose.position.x == 0.0 and localization.pose.position.y == 0.0:
+            print "localization problem"
+
+        listener.waitForTransform('map', stampedPose.header.frame_id, now, rospy.Duration(3.0))
+        newPose = listener.transformPose('map', stampedPose)
+
+        marker = Marker()
+        marker.header.stamp = detection.header.stamp
+        marker.header.frame_id = newPose.header.frame_id
+        marker.pose = newPose.pose
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        marker.frame_locked = False
+        marker.lifetime = rospy.Duration.from_sec(1)
+        marker.id = self.marker_id_counter
+        marker.scale = Vector3(0.1, 0.1, 0.1)
+        marker.color = ColorRGBA(1, 0, 0, 1)
+        self.markers.markers.append(marker)
+
+        marker2 = Marker()
+        marker2.header.stamp = marker.header.stamp
+        marker2.header.frame_id = newPose.header.frame_id
+        marker2.pose = newPose.pose
+        marker2.type = Marker.CUBE
+        marker2.action = Marker.ADD
+        marker2.frame_locked = False
+        marker2.lifetime = rospy.Time(0.0)
+        marker2.id = self.marker_id_counter
+        marker2.scale = Vector3(0.1, 0.1, 0.1)
+        marker2.color = ColorRGBA(0, 1, 0, 1)
+        self.all_markers.markers.append(marker2)
+        
+        if (self.checkForFaceLocation(newPose.pose, detection, newPose.header.frame_id)):
+            marker3 = Marker()
+            marker3.header.stamp = detection.header.stamp
+            marker3.header.frame_id = newPose.header.frame_id
+            marker3.pose = newPose.pose
+            marker3.type = Marker.CUBE
+            marker3.action = Marker.ADD
+            marker3.frame_locked = False
+            marker3.lifetime = rospy.Time(0)
+            marker3.id = self.marker_id_counter
+            marker3.scale = Vector3(0.1, 0.1, 0.1)
+            marker3.color = ColorRGBA(0, 0, 1, 1)
+            marker3.lifetime = rospy.Time(0)
+            marker3.text = "obraz"
+            
+            print "FACE_LOC"
+            
+            self.face_loc_markers.markers.append(marker3)    # dejanska lokacija za robota
+
+    def flush(self):
+        self.markers_pub.publish(self.markers)
+        self.all_markers_pub.publish(self.all_markers)
+        self.face_loc_pub.publish(self.face_loc_markers)
+        self.markers = MarkerArray()
+        #print "flush"
+        #self.recognition_pub.publish(self.rec_markers)
+
+    def __init__(self):
+        self.marker_id_counter = -1
+        self.region_scope = rospy.get_param('~region', 3)
+        self.buffer_size = rospy.get_param('~camera_buffer_size', 50)
+        rospy.wait_for_service('localizer/localize')
+
+        self.camera_infos = collections.deque(maxlen = self.buffer_size)
+        self.detections_sub = message_filters.Subscriber('detections', Detection)
+        self.detections_sub.registerCallback(self.detection_callback)
+        self.camera_sub = message_filters.Subscriber('camera_info', CameraInfo)
+        self.camera_sub.registerCallback(self.camera_callback)
+
+        self.localize = rospy.ServiceProxy('localizer/localize', Localize)
+        self.markers_pub = rospy.Publisher('markers', MarkerArray)
+        
+        all_markers_topic = rospy.get_param('~markers_topic', rospy.resolve_name('%s/markers_all' % rospy.get_name()))
+        face_loc_topic = rospy.get_param('~face_loc_topic', rospy.resolve_name('%s/face_loc' % rospy.get_name()))
+
+        self.all_markers_pub = rospy.Publisher(all_markers_topic, MarkerArray, queue_size = 300)
+        self.face_loc_pub = rospy.Publisher(face_loc_topic, MarkerArray, queue_size = 300)
+
+        self.all_markers = MarkerArray()
+        self.face_loc_markers = MarkerArray()
+
+        # for current position of robot
+        rospy.Subscriber("/amcl_pose", PoseWithCovarianceStamped, self.callback_pose)
+
+        # for recognition
+        self.bridge = CvBridge()
+
+        # for flush, due to bugs
+        self.markers = MarkerArray()
+        
+        # initialize dictionary for face recognition
+        self.faceDict = {}
+        self.rec_markers = MarkerArray()
+        self.recognition_pub = rospy.Publisher('rec_faces', MarkerArray)
+        
+        # temporary - save detected images
+        self.saveCount = 0
+        self.face_size = (80, 80)
+        #self.face_names = {0:"Forest", 1:"Filip", 2:"Scarlet", 3:"Tina", 4:"Peter",\
+        #              5:"Kim", 6:"Harry", 7:"Matthew", 8:"Ellen"}
+        self.face_names = {0:"Ellen", 1:"Filip", 2:"Forest", 3:"Harry", 4:"Kim",\
+                      5:"Matthew", 6:"Peter", 7:"Scarlet", 8:"Tina"}
+
+        # opencv recognizer
+        self.recognizer = cv2.createLBPHFaceRecognizer()
+        path = '/home/team_alpha/catkin_ws/src/localizer/src/training/'
+        person = ['ellen', 'flisar', 'hanks', 'harry', 'korea', 'mathew', 'prevc', 'scarlet', 'tina']
+        # images will contains face images
+        images = []
+        # labels will contains the label that is assigned to the image
+        labels = []
+        class_id = 0
+        for p in person:
+            image_paths = [os.path.join(path, p, f) for f in os.listdir(path+p)]
+            for image_path in image_paths:
+                    # Read the image and convert to grayscale
+                    image_pil = Image.open(image_path).convert('L')
+                    # Convert the image format into numpy array
+                    image = np.array(image_pil, 'uint8')
+                    # Get the label of the image
+                    nbr = class_id
+                    images.append(image)
+                    labels.append(nbr)
+            class_id += 1
+        # return the images list and labels list
+
+        cv2.destroyAllWindows()
+        #print "recognizer train"
+        self.recognizer.train(images, np.array(labels))
+        print "recognizer Done"
+        self.recognizer.save('/home/team_alpha/Documents/PeopleIKnow.xml')
+
+if __name__ == '__main__':
+
+        rospy.init_node('localizer')
+
+        global listener
+        global transformer
+        global matrixW
+        global meansLDA
+
+        listener = tf.TransformListener()
+        transformer = tf.TransformerROS(True, rospy.Duration(10.0))
+
+        first = True
+        with open("/home/team_alpha/Documents/rins_W.txt") as f:
+            for line in f:
+                nums = line.split()
+                if first:
+                    matrixW = np.array([[float(x) for x in nums]])
+                    first = False
+                else:
+                    matrixW = np.concatenate((matrixW,[[float(x) for x in nums]]), axis=0)
+        matrixW = np.transpose(matrixW)
+        first = True
+        with open("/home/team_alpha/Documents/rins_Ms.txt") as f:
+            for line in f:
+                nums = line.split()
+                if first:
+                    meansLDA = np.array([[float(x) for x in nums]])
+                    first = False
+                else:
+                    meansLDA = np.concatenate((meansLDA,[[float(x) for x in nums]]), axis=0)
+        meansLDA = np.transpose(meansLDA)
+        #print np.shape(meansLDA)
+        try:
+            mapper = DetectionMapper()
+            r = rospy.Rate(30) # was 30, then 10
+            while not rospy.is_shutdown():
+                mapper.flush()
+                r.sleep()
+        except rospy.ROSInterruptException: pass

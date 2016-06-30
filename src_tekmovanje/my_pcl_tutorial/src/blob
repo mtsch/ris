@@ -1,0 +1,305 @@
+#!/usr/bin/python
+
+# Standard imports
+import cv2
+import numpy as np
+import rospy
+import roslib
+import sys
+import message_filters
+import collections
+from std_msgs.msg import String, ColorRGBA
+from sensor_msgs.msg import Image
+from localizer.srv import Localize
+from sensor_msgs.msg import CameraInfo
+from visualization_msgs.msg import Marker, MarkerArray
+from image_geometry import PinholeCameraModel
+from cv_bridge import CvBridge, CvBridgeError
+from geometry_msgs.msg import Point, Vector3, PoseStamped, PoseWithCovarianceStamped, Quaternion
+from nav_msgs.msg import *
+import math
+import tf
+
+class FindBlob():
+
+	def callback_pose(self, data):
+		self.lastpose = data.pose.pose.position
+
+	def callback_color(self, data):
+		self.barva = data.data
+
+	def checkForLocation(self, currentPoint):
+		sosedje = 7		# number of existing markers needed for valid location
+		distance = 0.10		# markers under this distance are counted for current location
+		faceExclusionZone = 1.5 # minimal distance between faces (don't add markers < this distance)
+		maximum_z = 0.20
+		overlapCount = 0
+		self_delta = 0.2
+		self_delta_max = 1.2
+
+		#print str(self.lastpose.x) + " " + str(currentPoint.x)
+		if currentPoint.z > maximum_z or currentPoint.z<0.10:
+			return False
+		if math.sqrt((self.lastpose.x - currentPoint.x)**2 + (self.lastpose.y - currentPoint.y)**2) < self_delta:
+			#print "DELTA ",math.sqrt((self.lastpose.x - currentPoint.x)**2 + (self.lastpose.y - currentPoint.y)**2)
+			return False
+		if math.sqrt((self.lastpose.x - currentPoint.x)**2 + (self.lastpose.y - currentPoint.y)**2) > self_delta_max:
+			#print "DELTA MAX ",math.sqrt((self.lastpose.x - currentPoint.x)**2 + (self.lastpose.y - currentPoint.y)**2)
+			return False
+		for marker in self.cilindri_markers.markers:
+			if (math.sqrt((currentPoint.x - marker.pose.position.x)**2 + (currentPoint.y - marker.pose.position.y)**2) < faceExclusionZone):
+				#print "facelocmarkers"
+				return False
+		for marker in self.vsi_markers.markers:
+			if (math.sqrt((currentPoint.x - marker.pose.position.x)**2 + (currentPoint.y - marker.pose.position.y)**2) < distance):
+				overlapCount += 1
+		if overlapCount <= sosedje:
+		#print "overlap < sosedje " + str(overlapCount) + " " + str(math.sqrt((currentPoint.x - marker.pose.position.x)**2 + (currentPoint.y - marker.pose.position.y)**2))
+			return overlapCount >= sosedje
+
+	def camera_callback(self, camera_info):
+		self.camera_infos.append(camera_info)
+
+	def image_callback(self, data):
+		try:
+			frame = self.bridge.imgmsg_to_cv2(data, "bgr8")
+		except CvBridgeError as e:
+			print(e)
+
+		height, width, channels = frame.shape
+		#print frame[height/2, width/2]
+		
+		im = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+		out = []
+		if len(self.colors1)==0:
+			#print "NASEL VSE"
+			return
+		if not self.colors1.has_key(self.barva):
+			return
+		for (lower, upper) in self.colors1[self.barva]:
+			lower = np.array(lower, dtype = "uint8")
+			upper = np.array(upper, dtype = "uint8")
+
+			# the mask
+			mask = cv2.inRange(im, lower, upper)
+			out = cv2.bitwise_and(im, im, mask = mask)
+			#if color!=self.colors1[0][0]:
+			#	out = cv2.bitwise_or(out, output)
+			#else:
+			#	out = output
+
+		
+
+		#izbrise zgorni del slike
+		mask = np.ones((height,width), np.uint8)
+		mask[0:0.5*height,:] = 0
+		out = cv2.bitwise_and(out, out, mask = mask)
+
+		out1 = cv2.cvtColor(out, cv2.COLOR_HSV2BGR)
+		out2 = cv2.cvtColor(out1, cv2.COLOR_BGR2GRAY)
+		blurred = cv2.GaussianBlur(out2, (5, 5), 0)
+		ret, out3 = cv2.threshold(blurred,50,90,cv2.THRESH_BINARY)
+		
+		kernel = np.ones((5,5),np.uint8)
+		closing = cv2.morphologyEx(out3, cv2.MORPH_CLOSE, kernel)
+		closing = cv2.morphologyEx(closing, cv2.MORPH_CLOSE, kernel)
+		opening = cv2.morphologyEx(closing, cv2.MORPH_OPEN, kernel)
+		
+		contours,h = cv2.findContours(opening.copy(),cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+		areas = [cv2.contourArea(c) for c in contours]
+		if not areas:
+			#print "Ni nic"
+			return
+		max_index = np.argmax(areas)
+		max_areas = np.max(areas)
+		cnt=contours[max_index]
+		if max_areas < 800:
+			#print "Premajhen", max_areas			
+			return
+
+		x,y,w,h = cv2.boundingRect(cnt)
+		img = cv2.cvtColor(opening, cv2.COLOR_GRAY2BGR)
+		cv2.rectangle(img,(x,y),(x+w,y+h),(0,255,0),2)
+		print w/float(h)
+		if w>h:
+			print "vecje"
+			return
+		
+
+		marker_color = frame[x:x+w, y:y+h, :]
+		color_avg = np.array([np.mean(marker_color[:,:,i]) for i in range(3)])
+		color_avg = color_avg.astype(np.uint8)
+		color_avg.shape = (1,1,3)
+		if np.nan in color_avg:
+			print "NAN"
+			return
+		color_avg1 = cv2.cvtColor(color_avg, cv2.COLOR_BGR2HSV)
+		#print color_avg1	
+
+		M = cv2.moments(cnt)
+		uX = int(M["m10"] / M["m00"])
+		vY = int(M["m01"] / M["m00"])
+		cv2.circle(img, (uX, vY), 7, (255, 255, 255), -1)
+		
+		# Localization
+		camera_info = None
+		best_time = 100
+		for ci in self.camera_infos:
+			time = abs(ci.header.stamp.to_sec() - data.header.stamp.to_sec())
+			if time < best_time:
+				camera_info = ci
+				best_time = time
+
+		if not camera_info or best_time > 1:
+			#print "best time"
+			return		
+
+		camera_model = PinholeCameraModel()
+		camera_model.fromCameraInfo(camera_info)
+		
+		point = Point(((uX - camera_model.cx()) - camera_model.Tx()) / camera_model.fx(),
+		         ((vY - camera_model.cy()) - camera_model.Ty()) / camera_model.fy(), 1)
+
+		localization = self.localize(data.header, point, 3)
+		
+		if not localization:
+			#print "loc"
+			return
+		
+		now = data.header.stamp
+		stampedPose = PoseStamped()
+		stampedPose.pose = localization.pose
+		stampedPose.header.stamp = now
+		stampedPose.header.frame_id = data.header.frame_id
+
+		listener.waitForTransform("/map", stampedPose.header.frame_id, now, rospy.Duration(3.0))
+		newPose = listener.transformPose("/map", stampedPose)
+
+		marker = Marker()
+		marker.header.stamp = data.header.stamp
+		marker.header.frame_id = "/map"
+		marker.pose = newPose.pose
+		marker.type = Marker.CUBE
+		marker.action = Marker.ADD
+		marker.frame_locked = False
+		marker.lifetime = rospy.Duration.from_sec(5)
+		marker.id = self.marker_id_counter
+		marker.scale = Vector3(0.1, 0.1, 0.1)
+		marker.color = ColorRGBA(1, 1, 1, 1)
+		
+		self.vsi_markers.markers.append(marker)
+		self.marker_id_counter += 1
+		self.markers_vsi_pub.publish(self.vsi_markers)
+
+		if (self.checkForLocation(newPose.pose.position)):
+			marker1 = Marker()
+			marker1.header.stamp = data.header.stamp
+			marker1.header.frame_id = "/map"
+			marker1.pose = newPose.pose
+			#print "POSE ", newPose.pose.position.x, newPose.pose.position.y, newPose.pose.position.z
+			marker1.type = Marker.CYLINDER
+			marker1.action = Marker.ADD
+			marker1.frame_locked = False
+			marker1.lifetime = rospy.Time(0)
+			marker1.id = self.marker_id_counter
+			marker1.scale = Vector3(0.2, 0.2, 0.3)
+			print "Cylinder detected " + str(len(self.cilindri_markers.markers))
+			
+			"""marker_color = frame[x:x+w, y:y+h, :]
+			color_avg = np.array([np.mean(marker_color[:,:,i]) for i in range(3)])
+			color_avg = color_avg.astype(np.uint8)
+			color_avg.shape = (1,1,3)
+			if np.nan in color_avg:
+				#print "NAN"
+				return
+			color_avg = cv2.cvtColor(color_avg, cv2.COLOR_BGR2HSV)
+			for key in self.colors1:
+				(lower, upper) = self.colors1[key]
+				h = color_avg[0, 0, 0]
+				#print h, lower[0], upper[0]
+				if (h>=lower[0] and h<=upper[0]):
+					colorM = color
+"""
+			colores = {"blue":ColorRGBA(0, 0, 1, 1), "green":ColorRGBA(0, 1, 0, 1), "red":ColorRGBA(1, 0, 0, 1), "yellow":ColorRGBA(1, 1, 0, 1)}
+
+			marker1.color = colores[self.barva]
+			marker1.text = self.barva
+			marker1.pose.orientation = Quaternion(1,0,0,0)
+			colorN = {}
+			for key in self.colors1:
+				if key != self.barva:
+					colorN[key] = self.colors1[key]#.append((color, lower, upper))
+			self.colors1 = colorN
+			self.cilindri_markers.markers.append(marker1)	# dejanska lokacija za robota
+			print "Cylinder detected " + str(len(self.cilindri_markers.markers))
+			self.markers_pub.publish(self.cilindri_markers)
+
+		img = cv2.add(img, frame)
+		try:
+			self.image_pub.publish(self.bridge.cv2_to_imgmsg(img, "bgr8"))
+		except CvBridgeError as e:
+			print(e)
+
+
+	def __init__(self):
+		self.barva = "green"
+		self.colors3 = [("green", [33, 74, 20], [90, 255, 255]),#green
+							("red", [0, 100, 50], [10, 255, 255]),#red
+							("red", [160, 100, 50], [179, 255, 255]),#red
+							("blue", [100, 25, 70], [130, 255, 255]),#blue
+							("yellow", [15, 100, 80], [30, 255, 255])]#yellow
+
+		self.colors2 = [("green", [40, 40, 20], [99, 255, 255]),#green
+							("red", [0, 100, 50], [50, 255, 255]),#red
+							("red", [150, 100, 50], [179, 255, 255]),#red
+							("blue", [100, 25, 70], [140, 255, 255]),#blue
+							("yellow", [15, 100, 80], [39, 255, 255])]#yellow
+
+		self.colors1 = {"green": [([45, 74, 20], [90, 255, 255])],#green
+							"red": [([0, 100, 50], [10, 255, 255]),#red
+							([160, 100, 50], [179, 255, 255])],#red
+							"blue": [([100, 25, 70], [130, 255, 255])],#blue
+							"yellow": [([15, 100, 80], [30, 255, 255])]}#yellow
+
+		self.marker_id_counter = 0
+		self.vsi_markers = MarkerArray()
+		self.cilindri_markers = MarkerArray()
+		self.region_scope = rospy.get_param('~region', 3)
+		self.buffer_size = rospy.get_param('~camera_buffer_size', 30)
+		
+		self.image_pub = rospy.Publisher("image_topic", Image, queue_size=10)
+		self.bridge = CvBridge()
+
+		rospy.wait_for_service('localizer/localize')
+
+		self.camera_infos = collections.deque(maxlen = self.buffer_size)
+		self.image_sub = message_filters.Subscriber("/camera/rgb/image_color", Image)
+		self.image_sub.registerCallback(self.image_callback)
+		self.camera_sub = message_filters.Subscriber("/camera/rgb/camera_info", CameraInfo)
+		self.camera_sub.registerCallback(self.camera_callback)
+
+		self.localize = rospy.ServiceProxy('localizer/localize', Localize)
+		self.markers_vsi_pub = rospy.Publisher('markers_cilindrov_vsi', MarkerArray)
+
+		self.markers_pub = rospy.Publisher('markers_cilindrov', MarkerArray)
+
+		rospy.Subscriber("/amcl_pose", PoseWithCovarianceStamped, self.callback_pose)
+
+		rospy.Subscriber("/planner/street_color", String, self.callback_color)
+
+if __name__ == '__main__':
+	rospy.init_node('my_pcl_tutorial')
+
+	global listener
+	global transformer
+	listener = tf.TransformListener()
+	transformer = tf.TransformerROS(True, rospy.Duration(10.0))
+
+	try:
+		bl = FindBlob()		
+
+		rospy.spin()
+	except rospy.ROSInterruptException:
+		pass
+	cv2.destroyAllWindows()
